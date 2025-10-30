@@ -14,7 +14,7 @@
 ### Linux
 
 ```bash
-git clone 
+git clone https://github.com/ethanspock/netmapper.git
 # From this folder
 bash linux-install.sh
 python3 app.py
