@@ -14,6 +14,7 @@
 ### Linux
 
 ```bash
+git clone 
 # From this folder
 bash linux-install.sh
 python3 app.py
