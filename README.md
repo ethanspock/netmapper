@@ -1,5 +1,5 @@
 # Netmapper
-
+![Alt Text](netmapper/app/logo/netmapper_icon.png)
 ## Install and Run
 ### Linux
 ```bash
