@@ -189,9 +189,16 @@ class NetMapperApp(tk.Tk):
                 self.sniff_iface_combo.current(0)
         self.sniff_iface_combo.pack(side=tk.LEFT)
         ttk.Button(sniff_frame, text="Refresh", command=self._refresh_sniff_ifaces).pack(side=tk.LEFT, padx=6)
-        ttk.Label(sniff_frame, text="Filter").pack(side=tk.LEFT, padx=(10,2))
-        self.sniff_filter_var = tk.StringVar(value="tcp or udp")
-        ttk.Entry(sniff_frame, textvariable=self.sniff_filter_var, width=20).pack(side=tk.LEFT)
+        ttk.Label(sniff_frame, text="Protocols").pack(side=tk.LEFT, padx=(10,2))
+        self._init_sniff_presets()
+        self.sniff_filter_combo = ttk.Combobox(
+            sniff_frame,
+            values=list(self.sniff_filter_presets.keys()),
+            width=28,
+            state="normal",
+        )
+        self.sniff_filter_combo.set("All TCP/UDP")
+        self.sniff_filter_combo.pack(side=tk.LEFT)
         self.sniff_btn = ttk.Button(sniff_frame, text="Start Listen", command=self._start_listen, state=(tk.NORMAL if self.sniff_avail else tk.DISABLED))
         self.sniff_btn.pack(side=tk.LEFT, padx=6)
         self.sniff_stop_btn = ttk.Button(sniff_frame, text="Stop Listen", command=self._stop_listen, state=tk.DISABLED)
@@ -431,7 +438,10 @@ class NetMapperApp(tk.Tk):
             return
         disp = self.sniff_iface_var.get().strip()
         iface = self.sniff_iface_map.get(disp, disp) or None
-        bpf = self.sniff_filter_var.get().strip() or "tcp or udp"
+        sel = self.sniff_filter_combo.get().strip()
+        bpf = self.sniff_filter_presets.get(sel, sel)
+        if bpf is None:
+            bpf = "tcp or udp"
         self._sniff_stop.clear()
         self.sniff_btn.configure(state=tk.DISABLED)
         self.sniff_stop_btn.configure(state=tk.NORMAL)
@@ -508,6 +518,22 @@ class NetMapperApp(tk.Tk):
                     self.figure_canvas.draw_idle()
         except Exception:
             pass
+
+    def _init_sniff_presets(self):
+        # Display name -> BPF filter string (or empty for no filter)
+        self.sniff_filter_presets = {
+            "All TCP/UDP": "tcp or udp",
+            "Web (80,443)": "tcp and (port 80 or port 443)",
+            "DNS": "udp and port 53",
+            "SMB": "tcp and port 445",
+            "RDP": "tcp and port 3389",
+            "ICMP": "icmp",
+            "DHCP": "udp and (port 67 or port 68)",
+            "mDNS": "udp and port 5353",
+            "LLMNR": "udp and port 5355",
+            "NetBIOS-NS": "udp and port 137",
+            "No filter": "",
+        }
 
     def _layout_path(self):
         if not self.last_subnet:
