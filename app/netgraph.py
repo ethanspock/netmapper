@@ -147,18 +147,42 @@ def _tree_layout(g: nx.DiGraph) -> Dict[str, Tuple[float, float]]:
     return pos
 
 
-def draw_graph(g: nx.DiGraph, figsize=(10.5, 6.0)) -> Dict[str, Any]:
+def draw_graph(g: nx.DiGraph, figsize=(10.5, 6.0), theme: str = "light") -> Dict[str, Any]:
     fig, ax = plt.subplots(figsize=figsize)
     ax.axis("off")
 
     pos = _tree_layout(g)
     pos = _resolve_overlaps(pos, same_row_only=True, min_dist=0.04, iterations=40)
 
+    current_theme = {"name": theme}
+
+    def _theme_colors(name: str):
+        if name == "dark":
+            return {
+                "bg": "#0f1115",
+                "edge": "#9aa4b2",
+                "label_fc": "#000000",
+                "label_alpha": 0.55,
+                "label_color": "#e6e6e6",
+                "node_edge": "#dddddd",
+            }
+        return {
+            "bg": "#ffffff",
+            "edge": "#888888",
+            "label_fc": "#ffffff",
+            "label_alpha": 0.75,
+            "label_color": "#000000",
+            "node_edge": "#333333",
+        }
+
     def _render(ax, pos):
         ax.clear()
         ax.axis("off")
+        th = _theme_colors(current_theme["name"])  # type: ignore
+        ax.set_facecolor(th["bg"])  # type: ignore
+        fig.patch.set_facecolor(th["bg"])  # type: ignore
         # Edges
-        nx.draw_networkx_edges(g, pos, ax=ax, width=1.2, edge_color="#888")
+        nx.draw_networkx_edges(g, pos, ax=ax, width=1.2, edge_color=th["edge"])  # type: ignore
         # Labels with background for readability
         labels = {n: (data.get("label") or n) for n, data in g.nodes(data=True)}
         # Draw nodes by type with distinct shapes
@@ -176,7 +200,7 @@ def draw_graph(g: nx.DiGraph, figsize=(10.5, 6.0)) -> Dict[str, Any]:
                 node_color=color,
                 node_size=size,
                 linewidths=1,
-                edgecolors="#333",
+                edgecolors=th["node_edge"],  # type: ignore
                 ax=ax,
             )
         nx.draw_networkx_labels(
@@ -184,13 +208,18 @@ def draw_graph(g: nx.DiGraph, figsize=(10.5, 6.0)) -> Dict[str, Any]:
             pos,
             labels=labels,
             font_size=9,
+            font_color=th["label_color"],  # type: ignore
             ax=ax,
-            bbox=dict(boxstyle="round,pad=0.2", fc="white", ec="none", alpha=0.75),
+            bbox=dict(boxstyle="round,pad=0.2", fc=th["label_fc"], ec="none", alpha=th["label_alpha"]),  # type: ignore
         )
         fig.tight_layout()
 
+    def _set_theme(name: str):
+        current_theme["name"] = name
+        _render(ax, pos)
+
     _render(ax, pos)
-    return {"fig": fig, "ax": ax, "pos": pos, "g": g, "redraw": _render}
+    return {"fig": fig, "ax": ax, "pos": pos, "g": g, "redraw": _render, "set_theme": _set_theme}
 
 
 def _resolve_overlaps(

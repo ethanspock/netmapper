@@ -16,6 +16,7 @@ from scanner import (
 from netgraph import build_graph, draw_graph
 from device_classifier import classify_device
 from nmap_utils import nmap_available, run_nmap_xml
+from sniffer import sniff_available, get_capture_interfaces, get_capture_interfaces_detailed, sniff_packets
 
 try:
     from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
@@ -37,6 +38,10 @@ class NetMapperApp(tk.Tk):
         self.last_subnet = None
         self.last_gateway = None
         self.nmap_results = {}
+        self.passive_ports = {}
+        self._sniff_thread = None
+        self._sniff_stop = threading.Event()
+        self._sniff_queue: "queue.Queue[tuple[str,str]]" = queue.Queue()
 
         # Pre-fill subnet
         nets = get_local_ipv4_networks()
@@ -63,6 +68,10 @@ class NetMapperApp(tk.Tk):
 
         self.arp_var = tk.BooleanVar(value=True)
         ttk.Checkbutton(top, text="Include ARP-only", variable=self.arp_var).pack(side=tk.LEFT, padx=8)
+
+        # Theme toggle
+        self.dark_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(top, text="Dark Mode", variable=self.dark_var, command=lambda: self._apply_theme()).pack(side=tk.LEFT, padx=8)
 
         ttk.Button(top, text="Use Local", command=self._use_local).pack(side=tk.LEFT, padx=4)
         self.scan_btn = ttk.Button(top, text="Scan", command=self._start_scan)
@@ -154,8 +163,39 @@ class NetMapperApp(tk.Tk):
         if not self.nmap_avail:
             chk.state(["disabled"])  # type: ignore
 
+        # Passive listener controls
+        sniff_frame = ttk.Frame(self)
+        sniff_frame.pack(fill=tk.X, padx=10, pady=(0,8))
+        self.sniff_avail = sniff_available()
+        ttk.Label(sniff_frame, text=f"Passive Listener ({'available' if self.sniff_avail else 'requires scapy/npcap'})").pack(side=tk.LEFT)
+        ttk.Label(sniff_frame, text="Iface").pack(side=tk.LEFT, padx=(10,2))
+        self.sniff_iface_var = tk.StringVar()
+        self.sniff_iface_combo = ttk.Combobox(sniff_frame, textvariable=self.sniff_iface_var, width=45, state="readonly")
+        self.sniff_iface_map = {}
+        if self.sniff_avail:
+            try:
+                items = get_capture_interfaces_detailed()
+            except Exception:
+                items = []
+            disp = [it["display"] for it in items]
+            self.sniff_iface_map = {it["display"]: it["scapy"] for it in items}
+            self.sniff_iface_combo["values"] = disp
+            if disp:
+                self.sniff_iface_combo.current(0)
+        self.sniff_iface_combo.pack(side=tk.LEFT)
+        ttk.Button(sniff_frame, text="Refresh", command=self._refresh_sniff_ifaces).pack(side=tk.LEFT, padx=6)
+        ttk.Label(sniff_frame, text="Filter").pack(side=tk.LEFT, padx=(10,2))
+        self.sniff_filter_var = tk.StringVar(value="tcp or udp")
+        ttk.Entry(sniff_frame, textvariable=self.sniff_filter_var, width=20).pack(side=tk.LEFT)
+        self.sniff_btn = ttk.Button(sniff_frame, text="Start Listen", command=self._start_listen, state=(tk.NORMAL if self.sniff_avail else tk.DISABLED))
+        self.sniff_btn.pack(side=tk.LEFT, padx=6)
+        self.sniff_stop_btn = ttk.Button(sniff_frame, text="Stop Listen", command=self._stop_listen, state=tk.DISABLED)
+        self.sniff_stop_btn.pack(side=tk.LEFT)
+
         # Timer to poll progress
         self.after(200, self._poll_progress)
+        # Apply initial theme
+        self._apply_theme()
 
     def _use_local(self):
         nets = get_local_ipv4_networks()
@@ -248,7 +288,7 @@ class NetMapperApp(tk.Tk):
         # Draw graph
         try:
             g = build_graph(subnet, results, gateway_ip=gateway)
-            bundle = draw_graph(g)
+            bundle = draw_graph(g, theme=("dark" if self.dark_var.get() else "light"))
             self._render_figure(bundle)
             # Try auto-load saved layout for this subnet
             self._auto_load_layout()
@@ -282,6 +322,13 @@ class NetMapperApp(tk.Tk):
         except Exception:
             pass
         self._setup_dragging()
+        # Apply current theme to plot if supported
+        try:
+            if self.draw_bundle and self.draw_bundle.get("set_theme"):
+                self.draw_bundle["set_theme"]("dark" if self.dark_var.get() else "light")
+                self.figure_canvas.draw_idle()
+        except Exception:
+            pass
 
     def _poll_progress(self):
         try:
@@ -289,10 +336,32 @@ class NetMapperApp(tk.Tk):
                 done, total = self._progress_queue.get_nowait()
                 pct = 0 if total == 0 else int(done * 100 / total)
                 self.progress.configure(value=pct)
+            
+            while True:
+                ip, p = self._sniff_queue.get_nowait()
+                if not ip:
+                    continue
+                s = self.passive_ports.setdefault(ip, set())
+                s.add(p)
+
+            # unreachable unless queues drained, but keeps structure simple
         except queue.Empty:
             pass
-        finally:
-            self.after(200, self._poll_progress)
+        
+        if self.passive_ports:
+            for iid in self.tree.get_children():
+                vals = list(self.tree.item(iid, "values"))
+                ip = vals[0]
+                merged = []
+                if self.nmap_results.get(ip):
+                    merged.extend(self.nmap_results[ip])
+                if self.passive_ports.get(ip):
+                    merged.extend(sorted((pp, "") for pp in self.passive_ports[ip]))
+                if merged:
+                    vals[-1] = self._format_ports(merged)
+                    self.tree.item(iid, values=vals)
+        
+        self.after(200, self._poll_progress)
 
     def _format_ports(self, items):
         return ", ".join(f"{p} {s}" if s else p for p, s in items[:12])
@@ -333,6 +402,91 @@ class NetMapperApp(tk.Tk):
             except Exception:
                 pass
         self.status_var.set("Nmap complete")
+
+    def _start_listen(self):
+        if not self.sniff_avail:
+            messagebox.showwarning("Unavailable", "Install scapy and Npcap (Windows) to enable listening.")
+            return
+        if self._sniff_thread and self._sniff_thread.is_alive():
+            return
+        disp = self.sniff_iface_var.get().strip()
+        iface = self.sniff_iface_map.get(disp, disp) or None
+        bpf = self.sniff_filter_var.get().strip() or "tcp or udp"
+        self._sniff_stop.clear()
+        self.sniff_btn.configure(state=tk.DISABLED)
+        self.sniff_stop_btn.configure(state=tk.NORMAL)
+
+        def _cb(ip: str, port: str):
+            try:
+                self._sniff_queue.put((ip, port))
+            except Exception:
+                pass
+
+        def worker():
+            try:
+                sniff_packets(iface, bpf, _cb, self._sniff_stop)
+            finally:
+                self.after(0, self._listen_stopped)
+
+        self._sniff_thread = threading.Thread(target=worker, daemon=True)
+        self._sniff_thread.start()
+        self.status_var.set("Listening...")
+
+    def _stop_listen(self):
+        self._sniff_stop.set()
+
+    def _listen_stopped(self):
+        self.sniff_btn.configure(state=tk.NORMAL)
+        self.sniff_stop_btn.configure(state=tk.DISABLED)
+        self.status_var.set("Listener stopped")
+
+    def _refresh_sniff_ifaces(self):
+        if not self.sniff_avail:
+            return
+        try:
+            items = get_capture_interfaces_detailed()
+        except Exception:
+            items = []
+        disp = [it["display"] for it in items]
+        self.sniff_iface_map = {it["display"]: it["scapy"] for it in items}
+        self.sniff_iface_combo["values"] = disp
+        if disp:
+            self.sniff_iface_combo.current(0)
+
+    def _apply_theme(self):
+        try:
+            style = ttk.Style()
+            # Switch to a theme that honors style options across platforms
+            try:
+                style.theme_use("clam")
+            except Exception:
+                pass
+            dark = self.dark_var.get()
+            bg = "#0f1115" if dark else "#ffffff"
+            fg = "#e6e6e6" if dark else "#000000"
+            altbg = "#1a1d23" if dark else "#f5f5f5"
+            sel = "#314a7e" if dark else "#cde1ff"
+            self.configure(bg=bg)
+            style.configure("TFrame", background=bg)
+            style.configure("TLabel", background=bg, foreground=fg)
+            style.configure("TButton", background=altbg, foreground=fg)
+            style.configure("TCheckbutton", background=bg, foreground=fg)
+            style.configure("TEntry", fieldbackground=altbg, foreground=fg, background=altbg)
+            style.configure("TProgressbar", background="#5b8ff9")
+            # Treeview
+            style.configure("Treeview", background=altbg, fieldbackground=altbg, foreground=fg)
+            style.configure("Treeview.Heading", background=bg, foreground=fg)
+            # Panedwindow
+            style.configure("TPanedwindow", background=bg)
+            # Force redraw
+            self.update_idletasks()
+            # Update plot theme if present
+            if self.draw_bundle and self.draw_bundle.get("set_theme"):
+                self.draw_bundle["set_theme"]("dark" if dark else "light")
+                if self.figure_canvas:
+                    self.figure_canvas.draw_idle()
+        except Exception:
+            pass
 
     def _layout_path(self):
         if not self.last_subnet:
