@@ -1,7 +1,7 @@
-NetMapper – Auto Network Mapping (MVP)
+# Netmapper
 
-# Install and Run
-## Linux
+## Install and Run
+### Linux
 ```bash
 git clone https://github.com/ethanspock/netmapper.git
 cd netmapper/app/
@@ -10,7 +10,7 @@ source netmapper/bin/activate
 pip install -r requirements.txt
 python3 app.py
 ```
-## Windows
+### Windows
 ```powershell
 # Optional prerequisites (use winget; restart shell after installs)
 winget install -e --id Python.Python.3.11
@@ -30,7 +30,7 @@ python app.py
 ```
 
 
-Overview
+## Overview
 
 - Scans an IPv4 subnet (CIDR) using OS ping for host discovery.
 - Pulls MAC addresses from the ARP cache to enrich results.
@@ -38,20 +38,20 @@ Overview
 - Visualizes with networkx + matplotlib embedded in Tkinter using device icons.
  - Adds layered router grouping so hosts appear under their inferred router.
 
-Setup
+## Setup
 
 - Requires Python 3.9+.
 - Install dependencies:
   - `pip install -r netmapper_gui/requirements.txt`
 
-Run
+## Run
 
 - `python netmapper_gui/app.py`
 - Click “Use Local” to auto-fill your first private IPv4 subnet.
 - Optionally enable “Reverse DNS” to attempt hostnames.
 - Click “Scan” to discover hosts and render the map.
 
-Notes
+## Notes
 
 - Windows: scanning uses `ping`, `arp -a`, and `route print` under the hood.
 - Reverse DNS can be slow if PTR records are missing; leave off for speed.
@@ -59,7 +59,7 @@ Notes
 - You do not need admin for ping/arp on Windows.
  - The app now includes a Matplotlib toolbar (zoom/pan) and export buttons.
 
-Icon Mapping (Heuristic)
+## Icon Mapping (Heuristic)
 
 - Network: hexagon, blue.
 - Gateway: triangle up, gold.
@@ -75,7 +75,7 @@ Icon Mapping (Heuristic)
 
 Classification uses simple hostname/MAC/IP hints (no OUI DB). Edit `netmapper_gui/device_classifier.py` to tweak rules.
 
-Export
+## Export
 
 - PNG: saves the current graph view.
 - CSV: ip, alive, rtt_ms, hostname, mac, type.
