@@ -186,10 +186,60 @@ def get_arp_table() -> Dict[str, str]:
 
 
 def resolve_hostname(ip: str) -> Optional[str]:
+    # Try Python reverse lookup first
     try:
         return socket.gethostbyaddr(ip)[0]
     except Exception:
-        return None
+        pass
+
+    system = platform.system().lower()
+    # Cross-platform fallbacks, primarily for Linux
+    if system != "windows":
+        # 1) getent hosts
+        out = _run(["getent", "hosts", ip])
+        if out:
+            # format: "IP hostname [aliases...]"
+            for line in out.splitlines():
+                parts = line.split()
+                if len(parts) >= 2 and parts[0] == ip:
+                    return parts[1].rstrip('.')
+
+        # 2) avahi (mDNS/LLMNR)
+        out = _run(["avahi-resolve", "-a", ip])
+        if out:
+            # format: "IP	HOSTNAME"
+            for line in out.splitlines():
+                parts = line.split()  # split on whitespace
+                if len(parts) >= 2 and parts[0] == ip:
+                    return parts[1].rstrip('.')
+
+        # 3) dig PTR
+        out = _run(["dig", "+short", "-x", ip])
+        if out:
+            name = out.strip().splitlines()[0].strip()
+            if name:
+                return name.rstrip('.')
+
+        # 4) nslookup
+        out = _run(["nslookup", ip])
+        if out:
+            m = re.search(r"name\s*=\s*([^\r\n]+)", out, re.I)
+            if m:
+                return m.group(1).strip().rstrip('.')
+            m2 = re.search(r"Name:\s*([^\r\n]+)", out, re.I)
+            if m2:
+                return m2.group(1).strip().rstrip('.')
+
+        # 5) NetBIOS (optional, if nmblookup exists)
+        out = _run(["nmblookup", "-A", ip])
+        if out:
+            # Look for first <00> UNIQUE name
+            for line in out.splitlines():
+                m = re.search(r"^\s*([A-Z0-9\-_.$]+)\s+<00>\s+\w+\s+UNIQUE", line)
+                if m:
+                    return m.group(1)
+
+    return None
 
 
 def scan_subnet(
