@@ -7,7 +7,7 @@ git clone https://github.com/ethanspock/netmapper.git
 cd netmapper/app/
 python3 -m venv netmapper
 source netmapper/bin/activate
-pip install -r requirements.txt
+pip install -r requirements-linux.txt
 python3 app.py
 ```
 ### Windows
@@ -23,7 +23,7 @@ cd netmapper\app\
 py -3 -m venv netmapper
 . netmapper\Scripts\Activate.ps1
 python -m pip install --upgrade pip
-pip install -r requirements.txt
+pip install -r requirements-windows.txt
 
 # Run the app
 python app.py
