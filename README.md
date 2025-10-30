@@ -1,31 +1,20 @@
 # Netmapper
 ![Alt Text](app/logo/netmapper_icon.png)
 ## Install and Run
-### Linux
 ```bash
 git clone https://github.com/ethanspock/netmapper.git
 cd netmapper/app/
-python3 -m venv netmapper
-source netmapper/bin/activate
-pip install -r requirements-linux.txt
+# Install system deps + Python packages
+bash linux-install.sh
 python3 app.py
 ```
-### Windows
+## Windows
 ```powershell
 # Optional prerequisites (use winget; restart shell after installs)
-winget install -e --id Python.Python.3.11
-winget install -e --id Npcap.Npcap            # needed for passive listener
-winget install -e --id Nmap.Nmap              # optional, for Nmap scans
-
-# Set up virtual environment and install deps
-git clone https://github.com/ethanspock/netmapper.git
-cd netmapper\app\
-py -3 -m venv netmapper
-. netmapper\Scripts\Activate.ps1
-python -m pip install --upgrade pip
-pip install -r requirements-windows.txt
-
-# Run the app
+# Install system deps + Python packages
+./windows-install.ps1
+.
+# Run the app (after the script creates the venv)
 python app.py
 ```
 
