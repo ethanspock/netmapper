@@ -1,0 +1,8 @@
+networkx>=3.2
+matplotlib>=3.8
+psutil>=5.9
+scapy>=2.5.0
+
+# System tools to install separately on Windows:
+# - Npcap (WinPcap-compatible API) for packet capture
+# - Nmap (optional, for port scanning)

@@ -16,7 +16,14 @@ from scanner import (
 from netgraph import build_graph, draw_graph
 from device_classifier import classify_device
 from nmap_utils import nmap_available, run_nmap_xml
-from sniffer import sniff_available, get_capture_interfaces, get_capture_interfaces_detailed, sniff_packets
+from sniffer import (
+    sniff_available,
+    get_capture_interfaces,
+    get_capture_interfaces_detailed,
+    sniff_packets,
+    tcpdump_available,
+    run_tcpdump,
+)
 
 try:
     from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
@@ -171,7 +178,7 @@ class NetMapperApp(tk.Tk):
         # Passive listener controls
         sniff_frame = ttk.Frame(self.page_home)
         sniff_frame.pack(fill=tk.X, padx=10, pady=(0,8))
-        self.sniff_avail = sniff_available()
+        self.sniff_avail = sniff_available() or tcpdump_available()
         ttk.Label(sniff_frame, text=f"Passive Listener ({'available' if self.sniff_avail else 'requires scapy/npcap'})").pack(side=tk.LEFT)
         ttk.Label(sniff_frame, text="Iface").pack(side=tk.LEFT, padx=(10,2))
         self.sniff_iface_var = tk.StringVar()
@@ -199,6 +206,12 @@ class NetMapperApp(tk.Tk):
         )
         self.sniff_filter_combo.set("All TCP/UDP")
         self.sniff_filter_combo.pack(side=tk.LEFT)
+        # Backend toggle
+        self.tcpdump_var = tk.BooleanVar(value=tcpdump_available() and not sniff_available())
+        tcpdump_chk = ttk.Checkbutton(sniff_frame, text="Use tcpdump backend", variable=self.tcpdump_var)
+        tcpdump_chk.pack(side=tk.LEFT, padx=8)
+        if not tcpdump_available():
+            tcpdump_chk.state(["disabled"])  # type: ignore
         self.sniff_btn = ttk.Button(sniff_frame, text="Start Listen", command=self._start_listen, state=(tk.NORMAL if self.sniff_avail else tk.DISABLED))
         self.sniff_btn.pack(side=tk.LEFT, padx=6)
         self.sniff_stop_btn = ttk.Button(sniff_frame, text="Stop Listen", command=self._stop_listen, state=tk.DISABLED)
@@ -456,7 +469,10 @@ class NetMapperApp(tk.Tk):
 
         def worker():
             try:
-                sniff_packets(iface, bpf, _cb, self._sniff_stop, err_cb=lambda e: self._sniff_err_queue.put(e))
+                if self.tcpdump_var.get():
+                    run_tcpdump(iface, bpf, _cb, self._sniff_stop, err_cb=lambda e: self._sniff_err_queue.put(e))
+                else:
+                    sniff_packets(iface, bpf, _cb, self._sniff_stop, err_cb=lambda e: self._sniff_err_queue.put(e))
             finally:
                 self.after(0, self._listen_stopped)
 
@@ -544,7 +560,10 @@ class NetMapperApp(tk.Tk):
 
         def worker():
             try:
-                sniff_packets(iface, "", _cb, tmp_stop, err_cb=_err)
+                if self.tcpdump_var.get():
+                    run_tcpdump(iface, "", _cb, tmp_stop, err_cb=_err)
+                else:
+                    sniff_packets(iface, "", _cb, tmp_stop, err_cb=_err)
             finally:
                 tmp_stop.set()
 

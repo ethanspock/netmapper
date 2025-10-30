@@ -169,3 +169,81 @@ def sniff_packets(
                 pass
             # Continue trying until stop requested
             continue
+
+
+# ---- tcpdump backend as an alternative on Unix-like systems ----
+import shutil
+import subprocess
+import re
+
+
+def tcpdump_available() -> bool:
+    return shutil.which("tcpdump") is not None
+
+
+def run_tcpdump(
+    iface: Optional[str],
+    bpf_filter: str,
+    cb: Callable[[str, str], None],
+    stop_event: threading.Event,
+    *,
+    err_cb: Optional[Callable[[str], None]] = None,
+):
+    if not tcpdump_available():
+        if err_cb:
+            err_cb("tcpdump not found")
+        return
+    cmd = ["tcpdump", "-nn", "-l"]
+    if iface:
+        cmd += ["-i", iface]
+    if bpf_filter:
+        cmd += [bpf_filter]
+    try:
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1)
+    except Exception as e:
+        if err_cb:
+            err_cb(str(e))
+        return
+
+    def _reader():
+        try:
+            if not proc.stdout:
+                return
+            for line in proc.stdout:
+                if stop_event.is_set():
+                    break
+                try:
+                    m = re.search(r"\bIP6?\s+([^\s>]+)\s*>\s*([^\s:]+)", line)
+                    if not m:
+                        continue
+                    a = m.group(1)
+                    b = m.group(2)
+                    def _extract(addr: str):
+                        if re.match(r"^\d+\.\d+\.\d+\.\d+\.\d+$", addr):
+                            host, port = addr.rsplit(".", 1)
+                            return host, port + "/tcp"
+                        return addr, ""
+                    src_ip, src_p = _extract(a)
+                    dst_ip, dst_p = _extract(b)
+                    if src_ip:
+                        cb(src_ip, src_p)
+                    if dst_ip:
+                        cb(dst_ip, dst_p)
+                except Exception:
+                    continue
+        finally:
+            try:
+                proc.terminate()
+            except Exception:
+                pass
+
+    t = threading.Thread(target=_reader, daemon=True)
+    t.start()
+    while not stop_event.is_set():
+        if proc.poll() is not None:
+            break
+        stop_event.wait(0.2)
+    try:
+        proc.terminate()
+    except Exception:
+        pass

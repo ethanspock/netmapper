@@ -1,0 +1,9 @@
+networkx>=3.2
+matplotlib>=3.8
+psutil>=5.9
+scapy>=2.5.0
+
+# System tools to install separately on Linux:
+# - libpcap (packet capture), tcpdump (optional backend)
+# - avahi-utils (mDNS), dnsutils/bind-utils (dig/nslookup), samba-common-bin (nmblookup)
+# - nmap (optional, for port scanning)
