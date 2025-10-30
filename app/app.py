@@ -51,7 +51,17 @@ class NetMapperApp(tk.Tk):
             self.subnet_var.set(str(nets[0]))
 
     def _build_ui(self):
-        top = ttk.Frame(self)
+        # Pages
+        self.nb = ttk.Notebook(self)
+        self.page_home = ttk.Frame(self.nb)
+        self.page_map = ttk.Frame(self.nb)
+        self.page_table = ttk.Frame(self.nb)
+        self.nb.add(self.page_home, text="Home")
+        self.nb.add(self.page_map, text="Map")
+        self.nb.add(self.page_table, text="Table")
+        self.nb.pack(fill=tk.BOTH, expand=True)
+
+        top = ttk.Frame(self.page_home)
         top.pack(fill=tk.X, padx=10, pady=10)
 
         ttk.Label(top, text="Subnet (CIDR)").pack(side=tk.LEFT)
@@ -82,20 +92,15 @@ class NetMapperApp(tk.Tk):
         self.stop_btn.pack(side=tk.LEFT, padx=4)
 
         # Progress
-        prog_frame = ttk.Frame(self)
+        prog_frame = ttk.Frame(self.page_home)
         prog_frame.pack(fill=tk.X, padx=10)
         self.progress = ttk.Progressbar(prog_frame, maximum=100)
         self.progress.pack(fill=tk.X)
         self.status_var = tk.StringVar(value="Idle")
         ttk.Label(prog_frame, textvariable=self.status_var).pack(anchor=tk.W)
 
-        # Splitter
-        main = ttk.Panedwindow(self, orient=tk.HORIZONTAL)
-        main.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
-
-        # Left: table
-        left = ttk.Frame(main)
-        self.tree = ttk.Treeview(left, columns=("ip", "alive", "rtt", "hostname", "mac", "ports"), show="headings", height=20)
+        # Table page content
+        self.tree = ttk.Treeview(self.page_table, columns=("ip", "alive", "rtt", "hostname", "mac", "ports"), show="headings", height=20)
         for col, text in (
             ("ip", "IP"),
             ("alive", "Alive"),
@@ -107,24 +112,20 @@ class NetMapperApp(tk.Tk):
             self.tree.heading(col, text=text)
             width = 200 if col == "hostname" else (160 if col == "ports" else 120)
             self.tree.column(col, width=width, anchor=tk.W)
-        self.tree.pack(fill=tk.BOTH, expand=True)
-        left.pack(fill=tk.BOTH, expand=True)
+        self.tree.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
 
-        # Right: graph canvas
-        right = ttk.Frame(main)
+        # Map page canvas
+        right = ttk.Frame(self.page_map)
         self.canvas_widget = None
         self.figure = None
         self.figure_canvas = None
         self.draw_bundle = None
         self._dragging_node = None
         right.pack(fill=tk.BOTH, expand=True)
-
-        main.add(left, weight=1)
-        main.add(right, weight=1)
         self.right = right
 
         # Toolbar + export buttons under graph
-        tools = ttk.Frame(self)
+        tools = ttk.Frame(self.page_map)
         tools.pack(fill=tk.X, padx=10)
         try:
             from matplotlib.backends.backend_tkagg import NavigationToolbar2Tk
@@ -149,12 +150,14 @@ class NetMapperApp(tk.Tk):
         ttk.Button(exp_btns, text="Load Layout", command=self._load_layout).pack(side=tk.LEFT, padx=4)
 
         # Nmap controls
-        nmap_frame = ttk.Frame(self)
+        nmap_frame = ttk.Frame(self.page_home)
         nmap_frame.pack(fill=tk.X, padx=10, pady=(0,8))
         self.nmap_avail = nmap_available()
         self.use_nmap_var = tk.BooleanVar(value=False)
         chk = ttk.Checkbutton(nmap_frame, text=f"Use Nmap ({'available' if self.nmap_avail else 'not found'})", variable=self.use_nmap_var)
         chk.pack(side=tk.LEFT)
+        self.nmap_alive_only_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(nmap_frame, text="Alive only", variable=self.nmap_alive_only_var).pack(side=tk.LEFT, padx=(8,0))
         ttk.Label(nmap_frame, text="Options").pack(side=tk.LEFT, padx=(10,2))
         self.nmap_opts_var = tk.StringVar(value="-sV -T4 -Pn")
         ttk.Entry(nmap_frame, textvariable=self.nmap_opts_var, width=20).pack(side=tk.LEFT)
@@ -166,7 +169,7 @@ class NetMapperApp(tk.Tk):
             chk.state(["disabled"])  # type: ignore
 
         # Passive listener controls
-        sniff_frame = ttk.Frame(self)
+        sniff_frame = ttk.Frame(self.page_home)
         sniff_frame.pack(fill=tk.X, padx=10, pady=(0,8))
         self.sniff_avail = sniff_available()
         ttk.Label(sniff_frame, text=f"Passive Listener ({'available' if self.sniff_avail else 'requires scapy/npcap'})").pack(side=tk.LEFT)
@@ -294,6 +297,10 @@ class NetMapperApp(tk.Tk):
             g = build_graph(subnet, results, gateway_ip=gateway)
             bundle = draw_graph(g, theme=("dark" if self.dark_var.get() else "light"))
             self._render_figure(bundle)
+            try:
+                self.nb.select(self.page_map)
+            except Exception:
+                pass
             # Try auto-load saved layout for this subnet
             self._auto_load_layout()
         except Exception as e:
@@ -383,7 +390,10 @@ class NetMapperApp(tk.Tk):
         if not self.last_results:
             messagebox.showwarning("No hosts", "Run a scan first.")
             return
-        targets = [r.get("ip") for r in self.last_results if r.get("alive") == "yes" and r.get("ip")]
+        if self.nmap_alive_only_var.get():
+            targets = [r.get("ip") for r in self.last_results if r.get("alive") == "yes" and r.get("ip")]
+        else:
+            targets = [r.get("ip") for r in self.last_results if r.get("ip")]
         if not targets:
             messagebox.showwarning("No alive hosts", "No alive hosts to scan with nmap.")
             return
