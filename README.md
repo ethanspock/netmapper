@@ -4,8 +4,9 @@ Overview
 
 - Scans an IPv4 subnet (CIDR) using OS ping for host discovery.
 - Pulls MAC addresses from the ARP cache to enrich results.
-- Builds a simple topology: subnet → gateway → alive hosts.
-- Visualizes the graph with networkx + matplotlib embedded in Tkinter.
+- Builds a layered tree topology: subnet → gateway → typed hosts.
+- Visualizes with networkx + matplotlib embedded in Tkinter using device icons.
+ - Adds layered router grouping so hosts appear under their inferred router.
 
 Setup
 
@@ -26,6 +27,29 @@ Notes
 - Reverse DNS can be slow if PTR records are missing; leave off for speed.
 - ARP cache only reflects local L2 segment; MACs may be missing for remote subnets.
 - You do not need admin for ping/arp on Windows.
+ - The app now includes a Matplotlib toolbar (zoom/pan) and export buttons.
+
+Icon Mapping (Heuristic)
+
+- Network: hexagon, blue.
+- Gateway: triangle up, gold.
+- Router: triangle up, orange (if inferred by name/IP).
+- Switch: square, blue.
+- Access Point: triangle down, teal.
+- Server: pentagon, purple.
+- NAS: diamond, cyan.
+- Printer: diamond, gray.
+- Camera: octagon, dark gray.
+- VM: circle, light blue.
+- PC/Unknown: circle, green/gray.
+
+Classification uses simple hostname/MAC/IP hints (no OUI DB). Edit `netmapper_gui/device_classifier.py` to tweak rules.
+
+Export
+
+- PNG: saves the current graph view.
+- CSV: ip, alive, rtt_ms, hostname, mac, type.
+- JSON: includes subnet, gateway, and host records with type.
 
 Roadmap Ideas
 
@@ -34,4 +58,4 @@ Roadmap Ideas
 - Local ARP sweep or Scapy (requires admin/raw sockets) for deeper discovery.
 - Export results to JSON/CSV and save graph images.
 - Filter by alive/RTT and subnet presets per interface.
-
+ - Toggle between spring layout and tree layout.
