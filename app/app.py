@@ -203,6 +203,7 @@ class NetMapperApp(tk.Tk):
         self.sniff_btn.pack(side=tk.LEFT, padx=6)
         self.sniff_stop_btn = ttk.Button(sniff_frame, text="Stop Listen", command=self._stop_listen, state=tk.DISABLED)
         self.sniff_stop_btn.pack(side=tk.LEFT)
+        ttk.Button(sniff_frame, text="Test Capture", command=self._test_capture).pack(side=tk.LEFT, padx=6)
         self.sniff_status = tk.StringVar(value="Packets: 0")
         ttk.Label(sniff_frame, textvariable=self.sniff_status).pack(side=tk.RIGHT)
 
@@ -518,6 +519,47 @@ class NetMapperApp(tk.Tk):
                     self.figure_canvas.draw_idle()
         except Exception:
             pass
+
+    def _test_capture(self):
+        # Run a 2-second capture with no filter to validate the interface
+        if not self.sniff_avail:
+            messagebox.showwarning("Unavailable", "Install scapy and libpcap/Npcap to enable listening.")
+            return
+        disp = self.sniff_iface_var.get().strip()
+        iface = self.sniff_iface_map.get(disp, disp) or None
+        tmp_stop = threading.Event()
+        start_count = self._sniff_count
+
+        def _cb(ip: str, port: str):
+            try:
+                self._sniff_queue.put((ip, port))
+            except Exception:
+                pass
+
+        def _err(msg: str):
+            try:
+                self._sniff_err_queue.put(msg)
+            except Exception:
+                pass
+
+        def worker():
+            try:
+                sniff_packets(iface, "", _cb, tmp_stop, err_cb=_err)
+            finally:
+                tmp_stop.set()
+
+        t = threading.Thread(target=worker, daemon=True)
+        t.start()
+        # Stop after ~2 seconds
+        self.after(2000, lambda: tmp_stop.set())
+        # Poll shortly after to show results
+        def _report():
+            got = self._sniff_count - start_count
+            if got <= 0:
+                messagebox.showwarning("No packets detected", "No traffic captured. Try interface 'any' (Linux), run as root/Admin, or generate traffic.")
+            else:
+                messagebox.showinfo("Capture OK", f"Captured ~{got} packets in 2s on '{disp or iface}'.")
+        self.after(2400, _report)
 
     def _init_sniff_presets(self):
         # Display name -> BPF filter string (or empty for no filter)

@@ -1,6 +1,7 @@
 from typing import Callable, Optional, List, Dict
 import threading
 import socket
+import platform
 
 try:
     from scapy.all import sniff, IP, IPv6, TCP, UDP, get_if_list  # type: ignore
@@ -83,6 +84,13 @@ def get_capture_interfaces_detailed() -> List[Dict[str, str]]:
     except Exception:
         pass
 
+    # Add Linux/Unix pcap "any" pseudo interface to listen on all (if not Windows)
+    try:
+        if platform.system().lower() != "windows":
+            items.append({"display": "any (all interfaces)", "scapy": "any", "friendly": "any", "ips": ""})
+    except Exception:
+        pass
+
     # Sort: up interfaces first, then by display
     def sort_key(d: Dict[str, str]):
         friendly = d.get("friendly") or d.get("display") or ""
@@ -132,17 +140,32 @@ def sniff_packets(
         try:
             sniff(
                 iface=iface,
-                filter=bpf_filter,
+                filter=(bpf_filter or None),
                 prn=_proc,
                 store=False,
                 timeout=1,
                 promisc=promisc,
             )
         except Exception as e:
+            # If filter failed (e.g., libpcap missing), retry without filter
+            try:
+                msg = str(e)
+            except Exception:
+                msg = ""
             if err_cb:
                 try:
                     err_cb(str(e))
                 except Exception:
                     pass
+            try:
+                sniff(
+                    iface=iface,
+                    prn=_proc,
+                    store=False,
+                    timeout=1,
+                    promisc=promisc,
+                )
+            except Exception:
+                pass
             # Continue trying until stop requested
             continue
