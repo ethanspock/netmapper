@@ -1,0 +1,18 @@
+networkx>=3.2
+matplotlib>=3.8
+psutil>=5.9
+scapy>=2.5.0
+
+# Sniffing requirements (system-level, install separately):
+# - Packet capture driver:
+#   - Windows: Npcap (WinPcap API compatible mode)
+#   - Linux/macOS: libpcap (usually preinstalled via system packages)
+# - Optional tcpdump backend (recommended on Linux):
+#   - Install `tcpdump` via your package manager
+# - Privileges: run as Administrator (Windows) or with CAP_NET_RAW/CAP_NET_ADMIN or sudo (Linux)
+
+# Name resolution helpers (Linux, optional but recommended):
+# - avahi-utils (mDNS), dnsutils/bind-utils (dig/nslookup), samba-common-bin (nmblookup)
+
+# Port scanning (optional):
+# - nmap binary if you want to run Nmap scans from the app

@@ -218,11 +218,13 @@ def run_tcpdump(
                         continue
                     a = m.group(1)
                     b = m.group(2)
+                    proto = "udp" if (" UDP" in line) else ("tcp" if (" TCP" in line or " Flags [" in line) else "")
                     def _extract(addr: str):
                         if re.match(r"^\d+\.\d+\.\d+\.\d+\.\d+$", addr):
                             host, port = addr.rsplit(".", 1)
-                            return host, port + "/tcp"
-                        return addr, ""
+                            suffix = f"/{proto}" if proto else ""
+                            return host, port + suffix
+                        return addr, f"/{proto}" if proto else ""
                     src_ip, src_p = _extract(a)
                     dst_ip, dst_p = _extract(b)
                     if src_ip:

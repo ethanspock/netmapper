@@ -193,7 +193,15 @@ class NetMapperApp(tk.Tk):
             self.sniff_iface_map = {it["display"]: it["scapy"] for it in items}
             self.sniff_iface_combo["values"] = disp
             if disp:
-                self.sniff_iface_combo.current(0)
+                # Prefer 'any (all interfaces)' on Linux for reliability
+                try:
+                    import platform as _plat
+                    if _plat.system().lower() == "linux" and "any (all interfaces)" in disp:
+                        self.sniff_iface_combo.current(disp.index("any (all interfaces)"))
+                    else:
+                        self.sniff_iface_combo.current(0)
+                except Exception:
+                    self.sniff_iface_combo.current(0)
         self.sniff_iface_combo.pack(side=tk.LEFT)
         ttk.Button(sniff_frame, text="Refresh", command=self._refresh_sniff_ifaces).pack(side=tk.LEFT, padx=6)
         ttk.Label(sniff_frame, text="Protocols").pack(side=tk.LEFT, padx=(10,2))
@@ -207,7 +215,13 @@ class NetMapperApp(tk.Tk):
         self.sniff_filter_combo.set("All TCP/UDP")
         self.sniff_filter_combo.pack(side=tk.LEFT)
         # Backend toggle
-        self.tcpdump_var = tk.BooleanVar(value=tcpdump_available() and not sniff_available())
+        # On Linux default to tcpdump backend if available
+        try:
+            import platform as _plat
+            _linux = _plat.system().lower() == "linux"
+        except Exception:
+            _linux = False
+        self.tcpdump_var = tk.BooleanVar(value=(tcpdump_available() and (_linux or not sniff_available())))
         tcpdump_chk = ttk.Checkbutton(sniff_frame, text="Use tcpdump backend", variable=self.tcpdump_var)
         tcpdump_chk.pack(side=tk.LEFT, padx=8)
         if not tcpdump_available():
