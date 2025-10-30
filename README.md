@@ -1,5 +1,5 @@
 # NetMapper – Auto Network Mapping
-================================
+![Alt Text](app/logo/netmapper_icon.png)
 
 ## Overview
 
