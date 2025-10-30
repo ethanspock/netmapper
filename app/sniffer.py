@@ -99,6 +99,9 @@ def sniff_packets(
     bpf_filter: str,
     cb: Callable[[str, str], None],
     stop_event: threading.Event,
+    *,
+    err_cb: Optional[Callable[[str], None]] = None,
+    promisc: bool = True,
 ):
     if not sniff_available():
         return
@@ -133,7 +136,13 @@ def sniff_packets(
                 prn=_proc,
                 store=False,
                 timeout=1,
+                promisc=promisc,
             )
-        except Exception:
-            # Short sleep implicit via timeout; continue loop until stopped
+        except Exception as e:
+            if err_cb:
+                try:
+                    err_cb(str(e))
+                except Exception:
+                    pass
+            # Continue trying until stop requested
             continue

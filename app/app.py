@@ -42,6 +42,8 @@ class NetMapperApp(tk.Tk):
         self._sniff_thread = None
         self._sniff_stop = threading.Event()
         self._sniff_queue: "queue.Queue[tuple[str,str]]" = queue.Queue()
+        self._sniff_err_queue: "queue.Queue[str]" = queue.Queue()
+        self._sniff_count = 0
 
         # Pre-fill subnet
         nets = get_local_ipv4_networks()
@@ -191,6 +193,8 @@ class NetMapperApp(tk.Tk):
         self.sniff_btn.pack(side=tk.LEFT, padx=6)
         self.sniff_stop_btn = ttk.Button(sniff_frame, text="Stop Listen", command=self._stop_listen, state=tk.DISABLED)
         self.sniff_stop_btn.pack(side=tk.LEFT)
+        self.sniff_status = tk.StringVar(value="Packets: 0")
+        ttk.Label(sniff_frame, textvariable=self.sniff_status).pack(side=tk.RIGHT)
 
         # Timer to poll progress
         self.after(200, self._poll_progress)
@@ -343,6 +347,12 @@ class NetMapperApp(tk.Tk):
                     continue
                 s = self.passive_ports.setdefault(ip, set())
                 s.add(p)
+                self._sniff_count += 1
+            
+            while True:
+                err = self._sniff_err_queue.get_nowait()
+                if err:
+                    self.status_var.set(f"Listen error: {err}")
 
             # unreachable unless queues drained, but keeps structure simple
         except queue.Empty:
@@ -360,7 +370,7 @@ class NetMapperApp(tk.Tk):
                 if merged:
                     vals[-1] = self._format_ports(merged)
                     self.tree.item(iid, values=vals)
-        
+        self.sniff_status.set(f"Packets: {self._sniff_count}")
         self.after(200, self._poll_progress)
 
     def _format_ports(self, items):
@@ -415,6 +425,7 @@ class NetMapperApp(tk.Tk):
         self._sniff_stop.clear()
         self.sniff_btn.configure(state=tk.DISABLED)
         self.sniff_stop_btn.configure(state=tk.NORMAL)
+        self._sniff_count = 0
 
         def _cb(ip: str, port: str):
             try:
@@ -424,7 +435,7 @@ class NetMapperApp(tk.Tk):
 
         def worker():
             try:
-                sniff_packets(iface, bpf, _cb, self._sniff_stop)
+                sniff_packets(iface, bpf, _cb, self._sniff_stop, err_cb=lambda e: self._sniff_err_queue.put(e))
             finally:
                 self.after(0, self._listen_stopped)
 
