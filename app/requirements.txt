@@ -1,7 +1,0 @@
-networkx>=3.2
-matplotlib>=3.8
-psutil>=5.9
-scapy>=2.5.0
-# Note: external system tools recommended/used at runtime (install separately):
-# - Windows: Npcap (required for listener), Nmap (optional for port scans)
-# - Linux: avahi-utils (for mDNS), dnsutils/bind-utils (dig/nslookup), samba-common-bin (nmblookup), nmap
