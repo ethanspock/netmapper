@@ -1,5 +1,35 @@
 NetMapper – Auto Network Mapping (MVP)
 
+# Install and Run
+## Linux
+```bash
+git clone https://github.com/ethanspock/netmapper.git
+cd netmapper/app/
+python3 -m venv netmapper
+source netmapper/bin/activate
+pip install -r requirements.txt
+python3 app.py
+```
+## Windows
+```powershell
+# Optional prerequisites (use winget; restart shell after installs)
+winget install -e --id Python.Python.3.11
+winget install -e --id Npcap.Npcap            # needed for passive listener
+winget install -e --id Nmap.Nmap              # optional, for Nmap scans
+
+# Set up virtual environment and install deps
+git clone https://github.com/ethanspock/netmapper.git
+cd netmapper\app\
+py -3 -m venv netmapper
+. netmapper\Scripts\Activate.ps1
+python -m pip install --upgrade pip
+pip install -r requirements.txt
+
+# Run the app
+python app.py
+```
+
+
 Overview
 
 - Scans an IPv4 subnet (CIDR) using OS ping for host discovery.
