@@ -15,7 +15,8 @@
 
 ```bash
 git clone https://github.com/ethanspock/netmapper.git
-# From this folder
+cd netmapper/app/
+chmod +x linux-install.sh
 bash linux-install.sh
 python3 app.py
 ```
