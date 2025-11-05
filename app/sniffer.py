@@ -138,6 +138,17 @@ def sniff_packets(
 
     while not stop_event.is_set():
         try:
+            # On Windows, ensure Scapy uses pcap backend
+            try:
+                if platform.system().lower() == "windows":
+                    from scapy.config import conf  # type: ignore
+                    conf.use_pcap = True  # type: ignore
+                    try:
+                        conf.sniff_promisc = promisc  # type: ignore
+                    except Exception:
+                        pass
+            except Exception:
+                pass
             sniff(
                 iface=iface,
                 filter=(bpf_filter or None),
@@ -188,6 +199,7 @@ def run_tcpdump(
     stop_event: threading.Event,
     *,
     err_cb: Optional[Callable[[str], None]] = None,
+    line_cb: Optional[Callable[[str], None]] = None,
 ):
     if not tcpdump_available():
         if err_cb:
@@ -213,6 +225,11 @@ def run_tcpdump(
                 if stop_event.is_set():
                     break
                 try:
+                    if line_cb:
+                        try:
+                            line_cb(line.rstrip())
+                        except Exception:
+                            pass
                     m = re.search(r"\bIP6?\s+([^\s>]+)\s*>\s*([^\s:]+)", line)
                     if not m:
                         continue

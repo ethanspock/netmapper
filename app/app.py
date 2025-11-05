@@ -6,6 +6,11 @@ from typing import Optional
 import os
 import json
 import shutil
+import time
+try:
+    from tkinter import scrolledtext as st
+except Exception:
+    st = None  # type: ignore
 
 from scanner import (
     get_default_gateway,
@@ -51,6 +56,7 @@ class NetMapperApp(tk.Tk):
         self._sniff_queue: "queue.Queue[tuple[str,str]]" = queue.Queue()
         self._sniff_err_queue: "queue.Queue[str]" = queue.Queue()
         self._sniff_count = 0
+        self._log_queue: "queue.Queue[str]" = queue.Queue()
 
         # Pre-fill subnet
         nets = get_local_ipv4_networks()
@@ -203,7 +209,10 @@ class NetMapperApp(tk.Tk):
                 except Exception:
                     self.sniff_iface_combo.current(0)
         self.sniff_iface_combo.pack(side=tk.LEFT)
-        ttk.Button(sniff_frame, text="Refresh", command=self._refresh_sniff_ifaces).pack(side=tk.LEFT, padx=6)
+        self.sniff_refresh_btn = ttk.Button(sniff_frame, text="Refresh", command=self._refresh_sniff_ifaces)
+        self.sniff_refresh_btn.pack(side=tk.LEFT, padx=6)
+        self.sniff_autodetect_btn = ttk.Button(sniff_frame, text="Auto Detect", command=self._auto_detect_ifaces)
+        self.sniff_autodetect_btn.pack(side=tk.LEFT)
         ttk.Label(sniff_frame, text="Protocols").pack(side=tk.LEFT, padx=(10,2))
         self._init_sniff_presets()
         self.sniff_filter_combo = ttk.Combobox(
@@ -233,6 +242,17 @@ class NetMapperApp(tk.Tk):
         ttk.Button(sniff_frame, text="Test Capture", command=self._test_capture).pack(side=tk.LEFT, padx=6)
         self.sniff_status = tk.StringVar(value="Packets: 0")
         ttk.Label(sniff_frame, textvariable=self.sniff_status).pack(side=tk.RIGHT)
+
+        # Debug log panel
+        log_frame = ttk.Frame(self.page_home)
+        log_frame.pack(fill=tk.BOTH, expand=False, padx=10, pady=(4,8))
+        ttk.Label(log_frame, text="Listener Log").pack(anchor=tk.W)
+        if st:
+            self.log_widget = st.ScrolledText(log_frame, height=6, wrap=tk.WORD)
+        else:
+            self.log_widget = tk.Text(log_frame, height=6, wrap=tk.WORD)
+        self.log_widget.configure(state=tk.DISABLED)
+        self.log_widget.pack(fill=tk.BOTH, expand=True)
 
         # Timer to poll progress
         self.after(200, self._poll_progress)
@@ -413,6 +433,13 @@ class NetMapperApp(tk.Tk):
                     vals[-1] = self._format_ports(merged)
                     self.tree.item(iid, values=vals)
         self.sniff_status.set(f"Packets: {self._sniff_count}")
+        # Drain log messages
+        try:
+            while True:
+                msg = self._log_queue.get_nowait()
+                self._append_log(msg)
+        except queue.Empty:
+            pass
         self.after(200, self._poll_progress)
 
     def _format_ports(self, items):
@@ -484,8 +511,17 @@ class NetMapperApp(tk.Tk):
         def worker():
             try:
                 if self.tcpdump_var.get():
-                    run_tcpdump(iface, bpf, _cb, self._sniff_stop, err_cb=lambda e: self._sniff_err_queue.put(e))
+                    self._append_log(f"tcpdump backend start iface={iface or 'default'} filter='{bpf or ''}'")
+                    run_tcpdump(
+                        iface,
+                        bpf,
+                        _cb,
+                        self._sniff_stop,
+                        err_cb=lambda e: self._sniff_err_queue.put(e),
+                        line_cb=lambda ln: self._log_queue.put(ln),
+                    )
                 else:
+                    self._append_log(f"scapy backend start iface={iface or 'default'} filter='{bpf or ''}'")
                     sniff_packets(iface, bpf, _cb, self._sniff_stop, err_cb=lambda e: self._sniff_err_queue.put(e))
             finally:
                 self.after(0, self._listen_stopped)
@@ -575,8 +611,10 @@ class NetMapperApp(tk.Tk):
         def worker():
             try:
                 if self.tcpdump_var.get():
-                    run_tcpdump(iface, "", _cb, tmp_stop, err_cb=_err)
+                    self._append_log(f"tcpdump test iface={iface or 'default'} no filter")
+                    run_tcpdump(iface, "", _cb, tmp_stop, err_cb=_err, line_cb=lambda ln: self._log_queue.put(ln))
                 else:
+                    self._append_log(f"scapy test iface={iface or 'default'} no filter")
                     sniff_packets(iface, "", _cb, tmp_stop, err_cb=_err)
             finally:
                 tmp_stop.set()
@@ -593,6 +631,104 @@ class NetMapperApp(tk.Tk):
             else:
                 messagebox.showinfo("Capture OK", f"Captured ~{got} packets in 2s on '{disp or iface}'.")
         self.after(2400, _report)
+
+    def _append_log(self, msg: str):
+        try:
+            self.log_widget.configure(state=tk.NORMAL)
+            self.log_widget.insert(tk.END, msg + "\n")
+            self.log_widget.see(tk.END)
+        finally:
+            self.log_widget.configure(state=tk.DISABLED)
+
+    # --- Auto detect interfaces for traffic ---
+    def _capture_count_once(self, iface: Optional[str], duration_ms: int = 1200) -> int:
+        count = 0
+        stop = threading.Event()
+
+        def _cb(ip: str, port: str):
+            nonlocal count
+            count += 1
+
+        def _err(msg: str):
+            try:
+                self._sniff_err_queue.put(msg)
+            except Exception:
+                pass
+
+        def runner():
+            try:
+                if self.tcpdump_var.get():
+                    run_tcpdump(iface, "", _cb, stop, err_cb=_err)
+                else:
+                    sniff_packets(iface, "", _cb, stop, err_cb=_err)
+            except Exception:
+                pass
+
+        t = threading.Thread(target=runner, daemon=True)
+        t.start()
+        time.sleep(max(0.2, duration_ms / 1000.0))
+        stop.set()
+        t.join(timeout=1.0)
+        return count
+
+    def _auto_detect_ifaces(self):
+        if not self.sniff_avail:
+            messagebox.showwarning("Unavailable", "Install capture dependencies (Npcap on Windows, libpcap/tcpdump on Linux).")
+            return
+        # Disable buttons during detection
+        try:
+            self.sniff_btn.configure(state=tk.DISABLED)
+            self.sniff_stop_btn.configure(state=tk.DISABLED)
+            self.sniff_refresh_btn.configure(state=tk.DISABLED)
+            self.sniff_autodetect_btn.configure(state=tk.DISABLED)
+        except Exception:
+            pass
+        self.status_var.set("Auto-detecting interfaces...")
+
+        def worker():
+            try:
+                try:
+                    items = get_capture_interfaces_detailed()
+                except Exception:
+                    items = []
+                # Build list of (display, scapy)
+                pairs = [(it["display"], it["scapy"]) for it in items]
+                results = []
+                for disp, scapy_name in pairs:
+                    cnt = self._capture_count_once(scapy_name, duration_ms=1200)
+                    results.append((disp, scapy_name, cnt))
+                # Sort by count desc
+                results.sort(key=lambda x: x[2], reverse=True)
+                self.after(0, self._auto_detect_complete, results)
+            except Exception as e:
+                self.after(0, lambda: messagebox.showerror("Auto Detect", str(e)))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _auto_detect_complete(self, results):
+        # Re-enable buttons
+        try:
+            self.sniff_btn.configure(state=tk.NORMAL)
+            self.sniff_stop_btn.configure(state=tk.NORMAL if (self._sniff_thread and self._sniff_thread.is_alive()) else tk.DISABLED)
+            self.sniff_refresh_btn.configure(state=tk.NORMAL)
+            self.sniff_autodetect_btn.configure(state=tk.NORMAL)
+        except Exception:
+            pass
+        if not results:
+            self.status_var.set("Auto-detect failed")
+            messagebox.showwarning("Auto Detect", "No interfaces detected or no packets observed.")
+            return
+        # Update combobox with counts
+        values = [f"{disp}  —  {cnt} pkts" for (disp, scapy_name, cnt) in results]
+        mapping = {values[i]: results[i][1] for i in range(len(results))}
+        self.sniff_iface_map = mapping
+        self.sniff_iface_combo["values"] = values
+        # Pick top interface
+        self.sniff_iface_combo.current(0)
+        self.status_var.set(f"Auto-detect complete: top '{results[0][0]}' with {results[0][2]} pkts")
+        # Summary popup
+        top3 = "\n".join([f"{disp}: {cnt} pkts" for disp, _, cnt in results[:3]])
+        messagebox.showinfo("Auto Detect", f"Top interfaces by observed packets:\n{top3}")
 
     def _init_sniff_presets(self):
         # Display name -> BPF filter string (or empty for no filter)

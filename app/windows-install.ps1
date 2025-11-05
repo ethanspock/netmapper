@@ -18,10 +18,44 @@ function Install-WithWinget($id) {
   }
 }
 
+function Test-Admin {
+  try {
+    $current = [Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()
+    return $current.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+  } catch { return $false }
+}
+
+function Test-NpcapInstalled {
+  try {
+    if (Get-Service -Name npcap -ErrorAction SilentlyContinue) { return $true }
+  } catch {}
+  try { if (Test-Path "HKLM:\\SOFTWARE\\Npcap") { return $true } } catch {}
+  try { if (Test-Path "HKLM:\\SYSTEM\\CurrentControlSet\\Services\\npcap") { return $true } } catch {}
+  return $false
+}
+
+function Ensure-Npcap {
+  if (-not (Test-NpcapInstalled)) {
+    Write-Host "Npcap not detected; installing via winget..."
+    Install-WithWinget "Npcap.Npcap"
+    Start-Sleep -Seconds 3
+    if (-not (Test-NpcapInstalled)) {
+      Write-Warning "Npcap still not detected. You may need to reboot, then rerun this script, or install manually from https://npcap.com."
+    } else {
+      Write-Host "Npcap installed successfully."
+    }
+  } else {
+    Write-Host "Npcap detected."
+  }
+}
+
 Write-Host "Installing prerequisites (Python, Npcap, Nmap) via winget..."
 Require-Winget
+if (-not (Test-Admin)) {
+  Write-Warning "It is recommended to run this script in an elevated PowerShell (Run as Administrator)."
+}
 Install-WithWinget "Python.Python.3.11"
-Install-WithWinget "Npcap.Npcap"
+Ensure-Npcap
 Install-WithWinget "Nmap.Nmap"
 
 Write-Host "Creating virtual environment: $VenvName"
