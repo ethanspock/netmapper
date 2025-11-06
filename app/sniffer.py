@@ -4,7 +4,7 @@ import socket
 import platform
 
 try:
-    from scapy.all import sniff, IP, IPv6, TCP, UDP, get_if_list  # type: ignore
+    from scapy.all import sniff, IP, IPv6, TCP, UDP, ARP, get_if_list  # type: ignore
     try:
         from scapy.all import get_windows_if_list  # type: ignore
     except Exception:
@@ -121,6 +121,16 @@ def sniff_packets(
                 ip = pkt[IP]
             elif IPv6 is not None and pkt.haslayer(IPv6):
                 ip = pkt[IPv6]
+            elif 'ARP' in globals() and pkt.haslayer(ARP):  # type: ignore
+                try:
+                    a = pkt[ARP]
+                    if getattr(a, 'psrc', None):
+                        cb(a.psrc, "arp")
+                    if getattr(a, 'pdst', None):
+                        cb(a.pdst, "arp")
+                except Exception:
+                    pass
+                return
             if ip is None:
                 return
             src = ip.src
@@ -186,6 +196,7 @@ def sniff_packets(
 import shutil
 import subprocess
 import re
+import shlex
 
 
 def tcpdump_available() -> bool:
@@ -209,7 +220,10 @@ def run_tcpdump(
     if iface:
         cmd += ["-i", iface]
     if bpf_filter:
-        cmd += [bpf_filter]
+        try:
+            cmd += shlex.split(bpf_filter)
+        except Exception:
+            cmd += [bpf_filter]
     try:
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1)
     except Exception as e:
@@ -230,6 +244,18 @@ def run_tcpdump(
                             line_cb(line.rstrip())
                         except Exception:
                             pass
+                    # ARP: e.g., "ARP, Request who-has 192.168.1.1 tell 192.168.1.100" or "ARP, Reply 192.168.1.1 is-at ..."
+                    if "ARP" in line:
+                        m_req = re.search(r"who-has\s+(\d+\.\d+\.\d+\.\d+)\s+tell\s+(\d+\.\d+\.\d+\.\d+)", line)
+                        if m_req:
+                            cb(m_req.group(1), "arp")
+                            cb(m_req.group(2), "arp")
+                        else:
+                            m_rep = re.search(r"ARP,\s+Reply\s+(\d+\.\d+\.\d+\.\d+)\s+", line)
+                            if m_rep:
+                                cb(m_rep.group(1), "arp")
+                        continue
+
                     m = re.search(r"\bIP6?\s+([^\s>]+)\s*>\s*([^\s:]+)", line)
                     if not m:
                         continue
@@ -256,8 +282,31 @@ def run_tcpdump(
             except Exception:
                 pass
 
+    def _stderr_reader():
+        try:
+            if not proc.stderr:
+                return
+            for line in proc.stderr:
+                if stop_event.is_set():
+                    break
+                msg = line.rstrip()
+                if err_cb and msg:
+                    try:
+                        err_cb(msg)
+                    except Exception:
+                        pass
+                if line_cb and msg:
+                    try:
+                        line_cb(msg)
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
     t = threading.Thread(target=_reader, daemon=True)
     t.start()
+    te = threading.Thread(target=_stderr_reader, daemon=True)
+    te.start()
     while not stop_event.is_set():
         if proc.poll() is not None:
             break

@@ -1,12 +1,15 @@
-import threading
+import csv
+import json
+import os
+import platform
 import queue
+import shutil
+import threading
+import time
+import ipaddress
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
-from typing import Optional
-import os
-import json
-import shutil
-import time
+from typing import Callable, Dict, List, Optional, Set, Tuple
 try:
     from tkinter import scrolledtext as st
 except Exception:
@@ -21,6 +24,7 @@ from scanner import (
 from netgraph import build_graph, draw_graph
 from device_classifier import classify_device
 from nmap_utils import nmap_available, run_nmap_xml
+from capture_import import parse_capture
 from sniffer import (
     sniff_available,
     get_capture_interfaces,
@@ -29,6 +33,7 @@ from sniffer import (
     tcpdump_available,
     run_tcpdump,
 )
+from geolocation import lookup_ip_location
 
 try:
     from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
@@ -39,8 +44,9 @@ except Exception as e:  # pragma: no cover
 class NetMapperApp(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("NetMapper – Auto Network Mapping")
+        self.title("NetMapper - Auto Network Mapping")
         self.geometry("1000x650")
+        self.listen_all_var = tk.BooleanVar(master=self, value=False)
 
         self._build_ui()
         self._scan_thread: Optional[threading.Thread] = None
@@ -51,12 +57,15 @@ class NetMapperApp(tk.Tk):
         self.last_gateway = None
         self.nmap_results = {}
         self.passive_ports = {}
-        self._sniff_thread = None
+        self.geo_cache: Dict[str, Dict[str, str]] = {}
+        self._sniff_threads: List[threading.Thread] = []
         self._sniff_stop = threading.Event()
+        self._active_listens = 0
         self._sniff_queue: "queue.Queue[tuple[str,str]]" = queue.Queue()
         self._sniff_err_queue: "queue.Queue[str]" = queue.Queue()
         self._sniff_count = 0
         self._log_queue: "queue.Queue[str]" = queue.Queue()
+        self._last_autodetect: List[Tuple[str, int]] = []
 
         # Pre-fill subnet
         nets = get_local_ipv4_networks()
@@ -113,19 +122,37 @@ class NetMapperApp(tk.Tk):
         ttk.Label(prog_frame, textvariable=self.status_var).pack(anchor=tk.W)
 
         # Table page content
-        self.tree = ttk.Treeview(self.page_table, columns=("ip", "alive", "rtt", "hostname", "mac", "ports"), show="headings", height=20)
+        table_controls = ttk.Frame(self.page_table)
+        table_controls.pack(fill=tk.X, padx=10, pady=(10, 0))
+        ttk.Button(table_controls, text="Geolocate All Hosts", command=self._geolocate_table_all).pack(side=tk.LEFT)
+        ttk.Button(table_controls, text="Export Table CSV", command=self._export_table_csv).pack(side=tk.LEFT, padx=(8, 0))
+
+        self.tree = ttk.Treeview(
+            self.page_table,
+            columns=("ip", "alive", "rtt", "hostname", "mac", "location", "ports"),
+            show="headings",
+            height=20,
+        )
         for col, text in (
             ("ip", "IP"),
             ("alive", "Alive"),
             ("rtt", "RTT ms"),
             ("hostname", "Hostname"),
             ("mac", "MAC"),
+            ("location", "Location"),
             ("ports", "Open Ports"),
         ):
             self.tree.heading(col, text=text)
-            width = 200 if col == "hostname" else (160 if col == "ports" else 120)
+            if col == "hostname":
+                width = 200
+            elif col == "ports":
+                width = 180
+            elif col == "location":
+                width = 160
+            else:
+                width = 120
             self.tree.column(col, width=width, anchor=tk.W)
-        self.tree.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        self.tree.pack(fill=tk.BOTH, expand=True, padx=10, pady=(5, 10))
 
         # Map page canvas
         right = ttk.Frame(self.page_map)
@@ -134,6 +161,8 @@ class NetMapperApp(tk.Tk):
         self.figure_canvas = None
         self.draw_bundle = None
         self._dragging_node = None
+        self._selected_nodes = set()
+        self._last_mouse = None
         right.pack(fill=tk.BOTH, expand=True)
         self.right = right
 
@@ -161,6 +190,8 @@ class NetMapperApp(tk.Tk):
         ttk.Button(exp_btns, text="Export JSON", command=self._export_json).pack(side=tk.LEFT, padx=4)
         ttk.Button(exp_btns, text="Save Layout", command=self._save_layout).pack(side=tk.LEFT, padx=4)
         ttk.Button(exp_btns, text="Load Layout", command=self._load_layout).pack(side=tk.LEFT, padx=4)
+        ttk.Button(exp_btns, text="Geolocate Selection", command=self._geolocate_selection).pack(side=tk.LEFT, padx=4)
+        ttk.Button(exp_btns, text="Clear Selection", command=lambda: self._clear_selection()).pack(side=tk.LEFT, padx=4)
 
         # Nmap controls
         nmap_frame = ttk.Frame(self.page_home)
@@ -209,10 +240,19 @@ class NetMapperApp(tk.Tk):
                 except Exception:
                     self.sniff_iface_combo.current(0)
         self.sniff_iface_combo.pack(side=tk.LEFT)
+        self.listen_all_chk = ttk.Checkbutton(
+            sniff_frame,
+            text="Listen on all interfaces",
+            variable=self.listen_all_var,
+            command=self._on_listen_all_toggle,
+        )
+        self.listen_all_chk.pack(side=tk.LEFT, padx=(8, 0))
         self.sniff_refresh_btn = ttk.Button(sniff_frame, text="Refresh", command=self._refresh_sniff_ifaces)
         self.sniff_refresh_btn.pack(side=tk.LEFT, padx=6)
         self.sniff_autodetect_btn = ttk.Button(sniff_frame, text="Auto Detect", command=self._auto_detect_ifaces)
         self.sniff_autodetect_btn.pack(side=tk.LEFT)
+        self.sniff_import_btn = ttk.Button(sniff_frame, text="Import Capture", command=self._import_capture)
+        self.sniff_import_btn.pack(side=tk.LEFT, padx=6)
         ttk.Label(sniff_frame, text="Protocols").pack(side=tk.LEFT, padx=(10,2))
         self._init_sniff_presets()
         self.sniff_filter_combo = ttk.Combobox(
@@ -221,7 +261,7 @@ class NetMapperApp(tk.Tk):
             width=28,
             state="normal",
         )
-        self.sniff_filter_combo.set("All TCP/UDP")
+        self.sniff_filter_combo.set("All (IP + ARP)")
         self.sniff_filter_combo.pack(side=tk.LEFT)
         # Backend toggle
         # On Linux default to tcpdump backend if available
@@ -257,6 +297,7 @@ class NetMapperApp(tk.Tk):
         # Timer to poll progress
         self.after(200, self._poll_progress)
         # Apply initial theme
+        self._on_listen_all_toggle()
         self._apply_theme()
 
     def _use_local(self):
@@ -300,7 +341,7 @@ class NetMapperApp(tk.Tk):
         self._stop.clear()
         self.scan_btn.configure(state=tk.DISABLED)
         self.stop_btn.configure(state=tk.NORMAL)
-        self.status_var.set("Scanning…")
+        self.status_var.set("Scanning...")
         self.progress.configure(value=0)
         for row in self.tree.get_children():
             self.tree.delete(row)
@@ -344,13 +385,15 @@ class NetMapperApp(tk.Tk):
         self.last_gateway = gateway
         # Populate table
         for r in results:
-            ports = self._format_ports(self.nmap_results.get(r.get("ip"), [])) if self.nmap_results else ""
-            self.tree.insert("", tk.END, values=(r.get("ip"), r.get("alive"), r.get("rtt_ms"), r.get("hostname"), r.get("mac"), ports))
+            ip = r.get("ip")
+            ports = self._format_ports(self.nmap_results.get(ip, [])) if self.nmap_results else ""
+            location = self._get_location_str(ip)
+            self.tree.insert("", tk.END, values=(ip, r.get("alive"), r.get("rtt_ms"), r.get("hostname"), r.get("mac"), location, ports))
 
         # Draw graph
         try:
             g = build_graph(subnet, results, gateway_ip=gateway)
-            bundle = draw_graph(g, theme=("dark" if self.dark_var.get() else "light"))
+            bundle = draw_graph(g, theme=("dark" if self.dark_var.get() else "light"), highlight=self._selected_nodes)
             self._render_figure(bundle)
             try:
                 self.nb.select(self.page_map)
@@ -388,13 +431,14 @@ class NetMapperApp(tk.Tk):
         except Exception:
             pass
         self._setup_dragging()
+        self._refresh_highlight()
         # Apply current theme to plot if supported
         try:
             if self.draw_bundle and self.draw_bundle.get("set_theme"):
                 self.draw_bundle["set_theme"]("dark" if self.dark_var.get() else "light")
-                self.figure_canvas.draw_idle()
         except Exception:
             pass
+        self._refresh_highlight()
 
     def _poll_progress(self):
         try:
@@ -431,7 +475,23 @@ class NetMapperApp(tk.Tk):
                     merged.extend(sorted((pp, "") for pp in self.passive_ports[ip]))
                 if merged:
                     vals[-1] = self._format_ports(merged)
-                    self.tree.item(iid, values=vals)
+                vals[-2] = self._get_location_str(ip)
+                self.tree.item(iid, values=vals)
+            # Insert ARP-only or new observed IPs into the table
+            existing_ips = set(self.tree.item(iid, "values")[0] for iid in self.tree.get_children())
+            for ip, ports in self.passive_ports.items():
+                if ip not in existing_ips:
+                    merged = []
+                    if self.nmap_results.get(ip):
+                        merged.extend(self.nmap_results[ip])
+                    if ports:
+                        merged.extend(sorted((pp, "") for pp in ports))
+                    loc = self._get_location_str(ip)
+                    self.tree.insert(
+                        "",
+                        tk.END,
+                        values=(ip, "yes", "", "", "", loc, self._format_ports(merged)),
+                    )
         self.sniff_status.set(f"Packets: {self._sniff_count}")
         # Drain log messages
         try:
@@ -444,6 +504,22 @@ class NetMapperApp(tk.Tk):
 
     def _format_ports(self, items):
         return ", ".join(f"{p} {s}" if s else p for p, s in items[:12])
+
+    def _get_location_str(self, ip: Optional[str]) -> str:
+        if not ip:
+            return ""
+        info = self.geo_cache.get(ip)
+        if not info:
+            return ""
+        parts = [info.get("city"), info.get("region"), info.get("country")]
+        parts = [p for p in parts if p]
+        text = ", ".join(parts)
+        if not text:
+            lat = info.get("lat") or ""
+            lon = info.get("lon") or ""
+            if lat and lon:
+                text = f"{lat},{lon}"
+        return text
 
     def _start_nmap(self):
         if not self.nmap_avail:
@@ -476,6 +552,7 @@ class NetMapperApp(tk.Tk):
             vals = list(self.tree.item(iid, "values"))
             ip = vals[0]
             vals[-1] = self._format_ports(self.nmap_results.get(ip, []))
+            vals[-2] = self._get_location_str(ip)
             self.tree.item(iid, values=vals)
         # Redraw labels unchanged
         if self.draw_bundle:
@@ -485,22 +562,38 @@ class NetMapperApp(tk.Tk):
                 pass
         self.status_var.set("Nmap complete")
 
+
+
+
     def _start_listen(self):
         if not self.sniff_avail:
             messagebox.showwarning("Unavailable", "Install scapy and Npcap (Windows) to enable listening.")
             return
-        if self._sniff_thread and self._sniff_thread.is_alive():
+        if self._is_listening():
             return
-        disp = self.sniff_iface_var.get().strip()
-        iface = self.sniff_iface_map.get(disp, disp) or None
+        interfaces = self._collect_listen_interfaces()
+        if not interfaces:
+            messagebox.showwarning("Listener", "No interfaces available to listen on.")
+            return
         sel = self.sniff_filter_combo.get().strip()
         bpf = self.sniff_filter_presets.get(sel, sel)
-        if bpf is None:
+        if not bpf:
             bpf = "tcp or udp"
-        self._sniff_stop.clear()
+        self._sniff_stop = threading.Event()
         self.sniff_btn.configure(state=tk.DISABLED)
         self.sniff_stop_btn.configure(state=tk.NORMAL)
+        self.sniff_refresh_btn.configure(state=tk.DISABLED)
+        self.sniff_autodetect_btn.configure(state=tk.DISABLED)
+        self.sniff_import_btn.configure(state=tk.DISABLED)
         self._sniff_count = 0
+        backend_choice = self._select_listener_backend()
+        include_lines = backend_choice == "tcpdump"
+        self._active_listens = len(interfaces)
+        self._sniff_threads = []
+        label = ", ".join(interfaces[:3])
+        if len(interfaces) > 3:
+            label += ", ..."
+        self.status_var.set(f"Listening ({label})" if label else "Listening...")
 
         def _cb(ip: str, port: str):
             try:
@@ -508,35 +601,135 @@ class NetMapperApp(tk.Tk):
             except Exception:
                 pass
 
-        def worker():
-            try:
-                if self.tcpdump_var.get():
-                    self._append_log(f"tcpdump backend start iface={iface or 'default'} filter='{bpf or ''}'")
-                    run_tcpdump(
-                        iface,
-                        bpf,
-                        _cb,
-                        self._sniff_stop,
-                        err_cb=lambda e: self._sniff_err_queue.put(e),
-                        line_cb=lambda ln: self._log_queue.put(ln),
-                    )
-                else:
-                    self._append_log(f"scapy backend start iface={iface or 'default'} filter='{bpf or ''}'")
-                    sniff_packets(iface, bpf, _cb, self._sniff_stop, err_cb=lambda e: self._sniff_err_queue.put(e))
-            finally:
-                self.after(0, self._listen_stopped)
+        def _finish():
+            self.after(0, self._listen_thread_finished)
 
-        self._sniff_thread = threading.Thread(target=worker, daemon=True)
-        self._sniff_thread.start()
-        self.status_var.set("Listening...")
+        for iface in interfaces:
+            thread = self._launch_capture_worker(
+                iface,
+                bpf,
+                self._sniff_stop,
+                _cb,
+                log=True,
+                include_lines=include_lines,
+                err_queue=self._sniff_err_queue,
+                on_finish=_finish,
+                backend=backend_choice,
+            )
+            self._sniff_threads.append(thread)
 
     def _stop_listen(self):
         self._sniff_stop.set()
+        for thread in list(self._sniff_threads):
+            if thread.is_alive():
+                thread.join(timeout=1)
+        self._reset_listen_ui()
 
-    def _listen_stopped(self):
-        self.sniff_btn.configure(state=tk.NORMAL)
+    def _listen_thread_finished(self):
+        self._active_listens = max(0, self._active_listens - 1)
+        if self._active_listens == 0:
+            self._reset_listen_ui()
+
+    def _reset_listen_ui(self):
+        self.sniff_btn.configure(state=tk.NORMAL if self.sniff_avail else tk.DISABLED)
         self.sniff_stop_btn.configure(state=tk.DISABLED)
+        self.sniff_refresh_btn.configure(state=tk.NORMAL)
+        self.sniff_autodetect_btn.configure(state=tk.NORMAL)
+        self.sniff_import_btn.configure(state=tk.NORMAL)
         self.status_var.set("Listener stopped")
+        self._sniff_threads = []
+        self._sniff_stop = threading.Event()
+        self._active_listens = 0
+
+    def _on_listen_all_toggle(self):
+        try:
+            if self.listen_all_var.get():
+                self.sniff_iface_combo.configure(state="disabled")
+            else:
+                self.sniff_iface_combo.configure(state="readonly")
+        except Exception:
+            pass
+
+
+
+    def _queue_log(self, msg: str):
+        try:
+            self._log_queue.put(msg)
+        except Exception:
+            pass
+
+    def _select_listener_backend(self) -> str:
+        try:
+            if self.tcpdump_var.get() and tcpdump_available():
+                if platform.system().lower() != "windows":
+                    return "tcpdump"
+        except Exception:
+            pass
+        return "scapy"
+
+    def _launch_capture_worker(
+        self,
+        iface: Optional[str],
+        bpf: str,
+        stop_event: threading.Event,
+        cb: Callable[[str, str], None],
+        *,
+        log: bool,
+        include_lines: bool,
+        err_queue: Optional["queue.Queue[str]"] = None,
+        on_finish: Optional[Callable[[], None]] = None,
+        backend: Optional[str] = None,
+    ) -> threading.Thread:
+        err_queue = err_queue or self._sniff_err_queue
+
+        def _err_cb(msg: str):
+            if not msg:
+                return
+            try:
+                err_queue.put(msg)
+            except Exception:
+                pass
+
+        def _line_cb(msg: str):
+            if include_lines and msg:
+                self._queue_log(msg)
+
+        def worker():
+            try:
+                choice = backend or self._select_listener_backend()
+                if choice == "tcpdump":
+                    if log:
+                        self._queue_log(f"tcpdump backend start iface={iface or 'default'} filter='{bpf or ''}'")
+                    run_tcpdump(
+                        iface,
+                        bpf,
+                        cb,
+                        stop_event,
+                        err_cb=_err_cb,
+                        line_cb=_line_cb if include_lines else None,
+                    )
+                else:
+                    if log:
+                        self._queue_log(f"scapy backend start iface={iface or 'default'} filter='{bpf or ''}'")
+                        if include_lines:
+                            try:
+                                avail = get_capture_interfaces()
+                                if avail:
+                                    self._queue_log("scapy ifaces: " + ", ".join(map(str, avail)))
+                            except Exception:
+                                pass
+                    sniff_packets(iface, bpf, cb, stop_event, err_cb=_err_cb)
+            finally:
+                if on_finish:
+                    try:
+                        on_finish()
+                    except Exception:
+                        pass
+
+        thread = threading.Thread(target=worker, daemon=True)
+        thread.start()
+        return thread
+
 
     def _refresh_sniff_ifaces(self):
         if not self.sniff_avail:
@@ -611,10 +804,10 @@ class NetMapperApp(tk.Tk):
         def worker():
             try:
                 if self.tcpdump_var.get():
-                    self._append_log(f"tcpdump test iface={iface or 'default'} no filter")
+                    self._queue_log(f"tcpdump test iface={iface or 'default'} no filter")
                     run_tcpdump(iface, "", _cb, tmp_stop, err_cb=_err, line_cb=lambda ln: self._log_queue.put(ln))
                 else:
-                    self._append_log(f"scapy test iface={iface or 'default'} no filter")
+                    self._queue_log(f"scapy test iface={iface or 'default'} no filter")
                     sniff_packets(iface, "", _cb, tmp_stop, err_cb=_err)
             finally:
                 tmp_stop.set()
@@ -640,7 +833,253 @@ class NetMapperApp(tk.Tk):
         finally:
             self.log_widget.configure(state=tk.DISABLED)
 
+    def _import_capture(self):
+        path = filedialog.askopenfilename(title="Import capture (pcap/pcapng/txt)", filetypes=[["Captures", "*.pcap;*.pcapng;*.txt;*.log;*.out"], ["All files", "*.*"]])
+        if not path:
+            return
+        try:
+            self._append_log(f"Importing capture: {path}")
+            data = parse_capture(path)
+            if not data:
+                messagebox.showwarning("Import", "No flows found in capture.")
+                return
+            # Merge into passive ports and table
+            for ip, ports in data.items():
+                s = self.passive_ports.setdefault(ip, set())
+                s.update(ports)
+            # Insert new IPs into table
+            existing_ips = set(self.tree.item(iid, "values")[0] for iid in self.tree.get_children())
+            for ip, ports in data.items():
+                if ip not in existing_ips:
+                    loc = self._get_location_str(ip)
+                    self.tree.insert("", tk.END, values=(ip, "yes", "", "", "", loc, self._format_ports(sorted((pp, "") for pp in ports))))
+            # Update existing rows' ports
+            for iid in self.tree.get_children():
+                vals = list(self.tree.item(iid, "values"))
+                ip = vals[0]
+                merged = []
+                if self.nmap_results.get(ip):
+                    merged.extend(self.nmap_results[ip])
+                if self.passive_ports.get(ip):
+                    merged.extend(sorted((pp, "") for pp in self.passive_ports[ip]))
+                if merged:
+                    vals[-1] = self._format_ports(merged)
+                vals[-2] = self._get_location_str(ip)
+                self.tree.item(iid, values=vals)
+            # Add imported IPs into last_results so map can include them
+            if self.last_results is None:
+                self.last_results = []
+            known = {r.get("ip") for r in self.last_results if r.get("ip")}
+            added = 0
+            for ip in data.keys():
+                if ip not in known:
+                    self.last_results.append({"ip": ip, "alive": "yes", "rtt_ms": None, "hostname": None, "mac": None})
+                    added += 1
+            # Rebuild map to include new hosts
+            try:
+                subnet = self.last_subnet or ("Imported/32")
+                g = build_graph(subnet, self.last_results, gateway_ip=self.last_gateway)
+                bundle = draw_graph(g, theme=("dark" if self.dark_var.get() else "light"), highlight=self._selected_nodes)
+                self._render_figure(bundle)
+                self._append_log(f"Imported {len(data)} hosts; added {added} to map")
+            except Exception:
+                pass
+        except MemoryError:
+            messagebox.showerror("Import error", "Capture too large to import; try narrowing the file.")
+        except Exception as e:
+            messagebox.showerror("Import error", str(e))
+
+    def _geolocate_selection(self):
+        ips = set()
+        if self.draw_bundle:
+            g = self.draw_bundle.get("g")
+            if g:
+                for node in self._selected_nodes:
+                    data = g.nodes.get(node, {})
+                    ip = data.get("ip")
+                    if not ip and node.startswith("host:"):
+                        ip = node.split(":", 1)[1]
+                    if not ip and node.startswith("gw:"):
+                        ip = node.split(":", 1)[1]
+                    if ip:
+                        ips.add(ip)
+        for iid in self.tree.selection():
+            vals = self.tree.item(iid, "values")
+            if vals and vals[0]:
+                ips.add(vals[0])
+        if not ips:
+            messagebox.showinfo("Geolocate", "Select hosts on the map (Ctrl+click) or rows in the table first.")
+            return
+        self._geolocate_ips(ips, context="selection")
+
+    def _geolocate_table_all(self):
+        ips = {self.tree.item(iid, "values")[0] for iid in self.tree.get_children() if self.tree.item(iid, "values")}
+        if not ips:
+            messagebox.showinfo("Geolocate", "No hosts in the table to geolocate.")
+            return
+        self._geolocate_ips(ips, context="table")
+
+    def _geolocate_ips(self, ips: Set[str], context: str):
+        filtered = {ip for ip in ips if self._ip_eligible(ip)}
+        if not filtered:
+            if context == "selection":
+                messagebox.showinfo("Geolocate", "No public IPs to geolocate (private/reserved addresses skipped).")
+            elif context == "table":
+                messagebox.showinfo("Geolocate", "All hosts appear to be private/reserved; nothing to geolocate.")
+            return
+        skipped = ips - filtered
+        if skipped:
+            self._append_log(f"Geolocate skipped private/reserved IPs: {', '.join(sorted(skipped))}")
+        self.status_var.set("Geolocating...")
+
+        def worker():
+            results, misses = {}, []
+            for ip in filtered:
+                info = lookup_ip_location(ip)
+                if info:
+                    results[ip] = info
+                else:
+                    misses.append(ip)
+            self.after(0, lambda: self._geolocate_complete(results, misses))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _geolocate_complete(self, results, misses):
+        if results:
+            lines = []
+            for ip, info in results.items():
+                self.geo_cache[ip] = info
+                line = (
+                    f"Geo {ip}: {info.get('city')}, {info.get('region')}, {info.get('country')} "
+                    f"(lat {info.get('lat')}, lon {info.get('lon')}) [{info.get('isp')}]"
+                )
+                lines.append(line)
+                self._append_log(line)
+            self._update_table_locations()
+            messagebox.showinfo("Geolocate", "\n".join(lines))
+        if misses:
+            self._append_log(f"Geolocate: no data for {', '.join(misses)}")
+        self.status_var.set("Idle")
+
+    def _clear_selection(self):
+        self._selected_nodes.clear()
+        self._refresh_highlight()
+
+    def _update_table_locations(self):
+        for iid in self.tree.get_children():
+            vals = list(self.tree.item(iid, "values"))
+            if not vals:
+                continue
+            ip = vals[0]
+            vals[-2] = self._get_location_str(ip)
+            self.tree.item(iid, values=vals)
+
+    def _refresh_highlight(self):
+        try:
+            if self.draw_bundle and self.draw_bundle.get("set_highlight"):
+                self.draw_bundle["set_highlight"](self._selected_nodes)
+        except Exception:
+            pass
+
+    def _ip_eligible(self, ip: str) -> bool:
+        try:
+            addr = ipaddress.ip_address(ip)
+            if addr.is_private or addr.is_loopback or addr.is_reserved or addr.is_multicast or addr.is_link_local:
+                return False
+            return True
+        except ValueError:
+            return False
+
+    def _resolve_iface_name(self, disp_value: str) -> Optional[str]:
+        # Exact mapping
+        m = getattr(self, 'sniff_iface_map', {})
+        if disp_value in m:
+            return m[disp_value]
+        # Strip autodetect counts suffix: "Name -> 123 pkts"
+        base = disp_value.split(' -> ')[0].strip()
+        if base in m:
+            return m[base]
+        # Try stripping parentheses
+        base2 = base.split('(')[0].strip() if '(' in base else base
+        if base2 in m:
+            return m[base2]
+        # Normalize and try to resolve via a fresh interface list
+        def _norm(s: str) -> str:
+            return ''.join(ch for ch in s.lower() if ch.isalnum())
+        try:
+            items = get_capture_interfaces_detailed()
+            norm_map = {_norm(it['display']): it['scapy'] for it in items}
+            nkey = _norm(base2)
+            if nkey in norm_map:
+                return norm_map[nkey]
+            # Windows-specific: try substring match on friendly names
+            import platform as _plat
+            if _plat.system().lower() == 'windows':
+                for it in items:
+                    if _norm(it['display']) == nkey or nkey in _norm(it['display']):
+                        return it['scapy']
+        except Exception:
+            pass
+        # Last resort on Windows: pick first NPF device to avoid friendly name issues
+        try:
+            import platform as _plat
+            if _plat.system().lower() == 'windows':
+                from sniffer import get_capture_interfaces
+                for dev in get_capture_interfaces() or []:
+                    if '\\Device\\NPF_' in str(dev):
+                        return dev
+        except Exception:
+            pass
+        return disp_value or None
+
     # --- Auto detect interfaces for traffic ---
+
+    def _collect_listen_interfaces(self) -> List[str]:
+        if self.listen_all_var.get():
+            candidates: List[str] = []
+            if self._last_autodetect:
+                for scapy_name, _ in self._last_autodetect:
+                    if scapy_name:
+                        candidates.append(scapy_name)
+            if not candidates:
+                try:
+                    items = get_capture_interfaces_detailed()
+                    candidates.extend(it.get('scapy') for it in items if it.get('scapy'))
+                except Exception:
+                    pass
+                try:
+                    extra = get_capture_interfaces() or []
+                    candidates.extend(extra)
+                except Exception:
+                    pass
+            candidates = [n for n in candidates if n]
+            try:
+                if platform.system().lower() == 'windows':
+                    candidates = [n for n in candidates if '\\Device\\NPF' in n]
+            except Exception:
+                pass
+            if self.tcpdump_var.get():
+                try:
+                    if platform.system().lower() != 'windows':
+                        return ['any']
+                except Exception:
+                    return ['any']
+            deduped: List[str] = []
+            for n in candidates:
+                if n and n not in deduped:
+                    deduped.append(n)
+            max_ifaces = 6
+            return deduped[:max_ifaces]
+        else:
+            disp = self.sniff_iface_var.get().strip()
+            iface = self._resolve_iface_name(disp)
+            return [iface] if iface else []
+
+    def _is_listening(self) -> bool:
+        return any(thread.is_alive() for thread in self._sniff_threads)
+
+
+
     def _capture_count_once(self, iface: Optional[str], duration_ms: int = 1200) -> int:
         count = 0
         stop = threading.Event()
@@ -649,26 +1088,23 @@ class NetMapperApp(tk.Tk):
             nonlocal count
             count += 1
 
-        def _err(msg: str):
-            try:
-                self._sniff_err_queue.put(msg)
-            except Exception:
-                pass
-
-        def runner():
-            try:
-                if self.tcpdump_var.get():
-                    run_tcpdump(iface, "", _cb, stop, err_cb=_err)
-                else:
-                    sniff_packets(iface, "", _cb, stop, err_cb=_err)
-            except Exception:
-                pass
-
-        t = threading.Thread(target=runner, daemon=True)
-        t.start()
+        backend_choice = self._select_listener_backend()
+        thread = self._launch_capture_worker(
+            iface,
+            "",
+            stop,
+            _cb,
+            log=False,
+            include_lines=False,
+            backend=backend_choice,
+        )
         time.sleep(max(0.2, duration_ms / 1000.0))
         stop.set()
-        t.join(timeout=1.0)
+        try:
+            if thread and thread.is_alive():
+                thread.join(timeout=1.0)
+        except Exception:
+            pass
         return count
 
     def _auto_detect_ifaces(self):
@@ -684,6 +1120,7 @@ class NetMapperApp(tk.Tk):
         except Exception:
             pass
         self.status_var.set("Auto-detecting interfaces...")
+        self._last_autodetect = []
 
         def worker():
             try:
@@ -699,6 +1136,7 @@ class NetMapperApp(tk.Tk):
                     results.append((disp, scapy_name, cnt))
                 # Sort by count desc
                 results.sort(key=lambda x: x[2], reverse=True)
+                self._last_autodetect = [(scapy_name, cnt) for (_, scapy_name, cnt) in results if scapy_name]
                 self.after(0, self._auto_detect_complete, results)
             except Exception as e:
                 self.after(0, lambda: messagebox.showerror("Auto Detect", str(e)))
@@ -709,7 +1147,7 @@ class NetMapperApp(tk.Tk):
         # Re-enable buttons
         try:
             self.sniff_btn.configure(state=tk.NORMAL)
-            self.sniff_stop_btn.configure(state=tk.NORMAL if (self._sniff_thread and self._sniff_thread.is_alive()) else tk.DISABLED)
+            self.sniff_stop_btn.configure(state=tk.NORMAL if self._is_listening() else tk.DISABLED)
             self.sniff_refresh_btn.configure(state=tk.NORMAL)
             self.sniff_autodetect_btn.configure(state=tk.NORMAL)
         except Exception:
@@ -719,7 +1157,7 @@ class NetMapperApp(tk.Tk):
             messagebox.showwarning("Auto Detect", "No interfaces detected or no packets observed.")
             return
         # Update combobox with counts
-        values = [f"{disp}  —  {cnt} pkts" for (disp, scapy_name, cnt) in results]
+        values = [f"{disp} -> {cnt} pkts" for (disp, scapy_name, cnt) in results]
         mapping = {values[i]: results[i][1] for i in range(len(results))}
         self.sniff_iface_map = mapping
         self.sniff_iface_combo["values"] = values
@@ -733,12 +1171,14 @@ class NetMapperApp(tk.Tk):
     def _init_sniff_presets(self):
         # Display name -> BPF filter string (or empty for no filter)
         self.sniff_filter_presets = {
+            "All (IP + ARP)": "ip or arp",
             "All TCP/UDP": "tcp or udp",
             "Web (80,443)": "tcp and (port 80 or port 443)",
             "DNS": "udp and port 53",
             "SMB": "tcp and port 445",
             "RDP": "tcp and port 3389",
             "ICMP": "icmp",
+            "ARP only": "arp",
             "DHCP": "udp and (port 67 or port 68)",
             "mDNS": "udp and port 5353",
             "LLMNR": "udp and port 5355",
@@ -807,7 +1247,6 @@ class NetMapperApp(tk.Tk):
     def _setup_dragging(self):
         if not self.figure or not self.draw_bundle:
             return
-        canvas = self.figure_canvas.get_tk_widget()
         fig = self.figure
         # Disconnect previous connections if any
         for attr in ("_cid_press", "_cid_release", "_cid_motion"):
@@ -822,6 +1261,7 @@ class NetMapperApp(tk.Tk):
         self._cid_press = fig.canvas.mpl_connect("button_press_event", self._on_press)
         self._cid_release = fig.canvas.mpl_connect("button_release_event", self._on_release)
         self._cid_motion = fig.canvas.mpl_connect("motion_notify_event", self._on_motion)
+        self._refresh_highlight()
 
     def _toolbar_mode(self):
         try:
@@ -837,11 +1277,28 @@ class NetMapperApp(tk.Tk):
         if self._toolbar_mode():
             return
         node = self._hit_test_node(event)
+        key = (event.key or "").lower() if hasattr(event, 'key') else ""
+        ctrl = ("control" in key) or ("ctrl" in key)
+        if ctrl:
+            if node:
+                if node in self._selected_nodes:
+                    self._selected_nodes.remove(node)
+                else:
+                    self._selected_nodes.add(node)
+            self._refresh_highlight()
+            return
         if node:
+            if node not in self._selected_nodes:
+                self._selected_nodes = {node}
             self._dragging_node = node
+            self._last_mouse = (event.xdata, event.ydata)
+        else:
+            self._selected_nodes.clear()
+        self._refresh_highlight()
 
     def _on_release(self, event):
         self._dragging_node = None
+        self._last_mouse = None
 
     def _on_motion(self, event):
         if not self.draw_bundle or not self._dragging_node:
@@ -851,14 +1308,23 @@ class NetMapperApp(tk.Tk):
         if event.xdata is None or event.ydata is None:
             return
         pos = self.draw_bundle.get("pos")
-        pos[self._dragging_node] = (
-            max(0.02, min(0.98, event.xdata)),
-            max(0.02, min(0.98, event.ydata)),
-        )
+        if self._last_mouse is None:
+            self._last_mouse = (event.xdata, event.ydata)
+        dx = event.xdata - self._last_mouse[0]
+        dy = event.ydata - self._last_mouse[1]
+        nodes_to_move = self._selected_nodes or {self._dragging_node}
+        for n in nodes_to_move:
+            if n in pos:
+                x, y = pos[n]
+                pos[n] = (
+                    max(0.02, min(0.98, x + dx)),
+                    max(0.02, min(0.98, y + dy)),
+                )
+        self._last_mouse = (event.xdata, event.ydata)
         redraw = self.draw_bundle.get("redraw")
         ax = self.draw_bundle.get("ax")
         try:
-            redraw(ax, pos)
+            redraw(ax, pos, highlight_nodes=self._selected_nodes)
             self.figure_canvas.draw_idle()
         except Exception:
             pass
@@ -879,6 +1345,25 @@ class NetMapperApp(tk.Tk):
                 best = n
                 best_d2 = d2
         return best
+
+    def _export_table_csv(self):
+        items = self.tree.get_children()
+        if not items:
+            messagebox.showwarning("No data", "Populate the table before exporting.")
+            return
+        path = filedialog.asksaveasfilename(defaultextension=".csv", filetypes=[["CSV", "*.csv"]])
+        if not path:
+            return
+        try:
+            headers = [self.tree.heading(col)["text"] or col for col in self.tree["columns"]]
+            with open(path, "w", newline="", encoding="utf-8") as f:
+                writer = csv.writer(f)
+                writer.writerow(headers)
+                for iid in items:
+                    writer.writerow(list(self.tree.item(iid, "values")))
+            messagebox.showinfo("Saved", f"Saved table CSV to: {path}")
+        except Exception as e:
+            messagebox.showerror("Export error", str(e))
 
     def _export_png(self):
         if not self.figure:
@@ -943,3 +1428,5 @@ class NetMapperApp(tk.Tk):
 if __name__ == "__main__":
     app = NetMapperApp()
     app.mainloop()
+
+
